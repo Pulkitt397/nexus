@@ -43,11 +43,12 @@ class NexusOverlay:
     States: idle | listening | transcribing | processing | speaking | error | hidden
     """
 
-    def __init__(self, mic_callback=None):
+    def __init__(self, mic_callback=None, stop_callback=None):
         self._cmd_queue: queue.Queue = queue.Queue()
         self._thread: Optional[threading.Thread] = None
         self._root: Optional[tk.Tk] = None
         self._mic_callback: callable = mic_callback or (lambda: None)
+        self._stop_callback: callable = stop_callback or (lambda: None)
         self._state = "idle"
         self._text = ""
         self._anim_phase = 0
@@ -59,9 +60,14 @@ class NexusOverlay:
         self._status_label: Optional[tk.Label] = None
         self._text_label: Optional[tk.Label] = None
         self._mic_btn: Optional[tk.Label] = None
+        self._stop_btn: Optional[tk.Label] = None
+        self._bottom_frame: Optional[tk.Frame] = None
 
     def set_mic_callback(self, cb: callable) -> None:
         self._mic_callback = cb
+
+    def set_stop_callback(self, cb: callable) -> None:
+        self._stop_callback = cb
 
     # ── Public API ───────────────────────────────────────────────────────────
 
@@ -164,12 +170,12 @@ class NexusOverlay:
             wraplength=_CARD_W - 48, justify="center",
         )
 
-        # ── Bottom row: mic button + gear ────────────────────────────────────
-        bottom = tk.Frame(self._frame, bg=_BG)
-        bottom.pack(side="bottom", pady=(0, 12))
+        # ── Bottom row: mic + stop + gear ────────────────────────────────────
+        self._bottom_frame = tk.Frame(self._frame, bg=_BG)
+        self._bottom_frame.pack(side="bottom", pady=(0, 12))
 
         self._mic_btn = tk.Label(
-            bottom, text="🎤", font=("Segoe UI", 22),
+            self._bottom_frame, text="🎤", font=("Segoe UI", 22),
             fg=_FG, bg="#1a1a2e", cursor="hand2",
             relief="flat", padx=10, pady=4,
         )
@@ -178,8 +184,17 @@ class NexusOverlay:
         self._mic_btn.bind("<Enter>", lambda e: self._mic_btn.configure(bg="#2a2a3e"))
         self._mic_btn.bind("<Leave>", lambda e: self._mic_btn.configure(bg="#1a1a2e"))
 
+        self._stop_btn = tk.Label(
+            self._bottom_frame, text="⏹", font=("Segoe UI", 16, "bold"),
+            fg="#f87171", bg="#2a1a1a", cursor="hand2",
+            relief="flat", padx=12, pady=4,
+        )
+        self._stop_btn.bind("<Button-1>", lambda e: self._on_stop_click())
+        self._stop_btn.bind("<Enter>", lambda e: self._stop_btn.configure(bg="#3a1a1a"))
+        self._stop_btn.bind("<Leave>", lambda e: self._stop_btn.configure(bg="#2a1a1a"))
+
         gear = tk.Label(
-            bottom, text="⚙️", font=("Segoe UI", 14),
+            self._bottom_frame, text="⚙️", font=("Segoe UI", 14),
             fg=_FG_DIM, bg=_BG, cursor="hand2",
         )
         gear.pack(side="left", padx=6)
@@ -203,6 +218,19 @@ class NexusOverlay:
             self._root.after(200, lambda: self._mic_btn.configure(bg="#1a1a2e", fg=_FG))
         except Exception:
             pass
+
+    def _on_stop_click(self) -> None:
+        self._stop_callback()
+
+    def _toggle_stop_btn(self, state: str) -> None:
+        """Show stop button only when active (listening/processing/speaking)."""
+        if not self._stop_btn or not self._bottom_frame:
+            return
+        visible = state in ("listening", "transcribing", "processing", "speaking")
+        if visible:
+            self._stop_btn.pack(side="left", padx=6, before=self._bottom_frame.winfo_children()[-1])
+        else:
+            self._stop_btn.pack_forget()
 
     def _on_gear_click(self) -> None:
         """Open setup by launching a subprocess."""
@@ -304,6 +332,7 @@ class NexusOverlay:
 
     def _set_state_internal(self, state: str, text: str) -> None:
         self._state = state
+        self._toggle_stop_btn(state)
 
         if state == "hidden":
             if self._root:

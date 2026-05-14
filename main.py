@@ -51,6 +51,7 @@ _BANNER = r"""
 
 _client = None
 _overlay: Optional[NexusOverlay] = None
+_stop_event: threading.Event = threading.Event()
 
 
 def _get_client():
@@ -206,6 +207,11 @@ async def _voice_loop() -> None:
                 _overlay.set_state("listening", "")
 
             user_text = await listen()
+            if _stop_event.is_set():
+                _stop_event.clear()
+                if _overlay:
+                    _overlay.set_state("idle", "Stopped")
+                continue
 
             if not user_text.strip():
                 logger.info("No speech detected, ignoring.")
@@ -223,12 +229,20 @@ async def _voice_loop() -> None:
                 _overlay.set_state("processing", f'Processing: "{user_text}"')
 
             reply = await _process_message(user_text)
+            if _stop_event.is_set():
+                _stop_event.clear()
+                if _overlay:
+                    _overlay.set_state("idle", "Stopped")
+                continue
+
             print(f"  [Nexus]: {reply}\n")
 
             if _overlay:
                 _overlay.set_state("speaking", reply)
 
             await speak(reply)
+            if _stop_event.is_set():
+                _stop_event.clear()
 
             if _overlay:
                 _overlay.set_state("idle", "Click 🎤 or press hotkey to speak")
@@ -364,11 +378,22 @@ def main() -> None:
                 logger.critical("No GEMINI_API_KEY set. Create a .env file or run with --setup.")
                 sys.exit(1)
 
+    _stop_event.clear()
+
+    def _on_stop():
+        _stop_event.set()
+        try:
+            from perception.tts_engine import stop_speaking
+            import asyncio
+            asyncio.run_coroutine_threadsafe(stop_speaking(), asyncio.get_event_loop())
+        except Exception:
+            pass
+
     if not args.no_overlay:
         try:
-            _overlay = NexusOverlay()
+            _overlay = NexusOverlay(stop_callback=_on_stop)
             _overlay.start()
-            logger.info("Transparent overlay active.")
+            logger.info("Orb overlay active.")
         except Exception as exc:
             logger.warning("Overlay failed to start: %s", exc)
             _overlay = None
