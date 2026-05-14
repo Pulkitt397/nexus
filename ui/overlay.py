@@ -13,8 +13,7 @@ from typing import Optional
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSlot
 from PyQt6.QtGui import (
-    QBrush, QColor, QConicalGradient, QFont, QLinearGradient, QPainter,
-    QPainterPath, QRadialGradient, QRegion,
+    QBrush, QColor, QFont, QPainter, QPainterPath, QPen, QRegion,
 )
 from PyQt6.QtWidgets import (
     QApplication, QGraphicsDropShadowEffect, QGraphicsEllipseItem,
@@ -119,8 +118,7 @@ class OrbView(QGraphicsView):
                 by = cy + math.sin(angle) * (28 + 8)
                 ex = cx + math.cos(angle) * (28 + 8 + bar_len)
                 ey = cy + math.sin(angle) * (28 + 8 + bar_len)
-                pen = self._scene.addLine(bx, by, ex, ey, pal["b"])
-                pen.setPenWidth(3)
+                self._scene.addLine(bx, by, ex, ey, QPen(pal["b"], 3))
             pulse = 1 + 0.05 * s(t * 5)
             r = int(28 * pulse)
             self._circle(cx, cy, r, pal["a"], 0, 255)
@@ -136,22 +134,23 @@ class OrbView(QGraphicsView):
         c = QColor(color)
         if alpha < 255:
             c.setAlpha(alpha)
-        item = self._scene.addEllipse(cx - r, cy - r, r * 2, r * 2, QBrush(c) if border_width == 0 else QBrush())
         if border_width > 0:
-            item.setPen(c)
-            item.setBrush(QBrush())
+            pen = QPen(c, border_width)
+            brush = QBrush(Qt.BrushStyle.NoBrush)
         else:
-            item.setBrush(QBrush(c))
+            pen = QPen(Qt.PenStyle.NoPen)
+            brush = QBrush(c)
+        self._scene.addEllipse(cx - r, cy - r, r * 2, r * 2, pen, brush)
 
     def _arc(self, cx, cy, r, start_angle, extent, color):
         rect_size = r * 2
-        item = self._scene.addArc(
+        pen = QPen(color, 3)
+        self._scene.addArc(
             cx - r, cy - r, rect_size, rect_size,
             int(start_angle * 16 * 57.3),
             int(extent * 16 * 57.3),
-            color,
+            pen,
         )
-        item.setPenWidth(3)
 
 
 class NexusOverlayWindow(QWidget):
