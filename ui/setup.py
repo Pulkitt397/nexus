@@ -13,15 +13,25 @@ from pathlib import Path
 
 logger = logging.getLogger("nexus.ui.setup")
 
-# Free-tier Gemini models (Google AI Studio, no credit card needed)
+# All models available on the Gemini API free tier (Google AI Studio)
+# Sorted newest → oldest. No credit card needed for any of these.
 AVAILABLE_MODELS = [
-    ("gemini-2.5-flash", "2.5 Flash — Best balance (500 req/day, free)"),
+    # ── Gemma (open-weight, supports function calling) ──────────────────────
+    ("gemma-4-31b-it",       "Gemma 4 31B — Open model, strong reasoning (1500 req/day, free)"),
+    ("gemma-4-26b-a4b-it",   "Gemma 4 26B — Open MoE, fast & capable (1500 req/day, free)"),
+    # ── Gemini 3 series ─────────────────────────────────────────────────────
+    ("gemini-3-flash-preview",     "3 Flash Preview — Newest speed model (500 req/day, free)"),
+    ("gemini-3.1-flash-lite-preview", "3.1 Flash-Lite Preview — Newest budget (1500 req/day, free)"),
+    # ── Gemini 2.5 series (recommended) ─────────────────────────────────────
+    ("gemini-2.5-flash",     "2.5 Flash — Best balance ★ (500 req/day, free)"),
     ("gemini-2.5-flash-lite", "2.5 Flash-Lite — Fastest (1500 req/day, free)"),
-    ("gemini-2.5-pro", "2.5 Pro — Most capable (25 req/day, free)"),
-    ("gemini-2.0-flash", "2.0 Flash — Legacy workhorse (1500 req/day, free)"),
+    ("gemini-2.5-pro",       "2.5 Pro — Most capable (25 req/day, free)"),
+    # ── Gemini 2.0 series (legacy) ──────────────────────────────────────────
+    ("gemini-2.0-flash",     "2.0 Flash — Legacy workhorse (1500 req/day, free)"),
     ("gemini-2.0-flash-lite", "2.0 Flash-Lite — Legacy budget (1500 req/day, free)"),
-    ("gemini-1.5-flash", "1.5 Flash — Legacy reliable (free)"),
-    ("gemini-1.5-pro", "1.5 Pro — Legacy capable (25 req/day, free)"),
+    # ── Gemini 1.5 series (legacy) ──────────────────────────────────────────
+    ("gemini-1.5-flash",     "1.5 Flash — Legacy reliable (free)"),
+    ("gemini-1.5-pro",       "1.5 Pro — Legacy capable (25 req/day, free)"),
 ]
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
