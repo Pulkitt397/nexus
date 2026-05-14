@@ -1,0 +1,38 @@
+# Nexus — Windows 11 AI Assistant
+# ================================
+
+# Core AI
+google-genai>=1.0.0
+
+# ── Speech ──────────────────────────────────────────────────────────────────
+faster-whisper>=1.0.0       # STT (speech-to-text via Whisper)
+sounddevice>=0.4.6          # Audio capture from microphone
+numpy>=1.26.0               # Array ops for audio processing
+edge-tts>=6.1.0             # TTS (Edge neural voices, no GPU needed)
+
+# ── Browser Automation ──────────────────────────────────────────────────────
+playwright>=1.40.0          # Full browser control (run: python -m playwright install chromium)
+
+# ── Desktop Control ─────────────────────────────────────────────────────────
+pyautogui>=0.9.54           # Mouse & keyboard simulation
+mss>=10.1.0                 # Fast screen capture
+pillow>=10.0.0              # Image processing for screenshots
+
+# ── OCR (optional — install Tesseract from https://github.com/UB-Mannheim/tesseract/wiki) ─
+pytesseract>=0.3.10
+
+# ── Windows Native API ──────────────────────────────────────────────────────
+pywin32>=305                # Win32 API bindings (windows, processes)
+pycaw>=20230407             # Audio / volume control
+comtypes>=1.2.0             # COM interop (used by pycaw)
+
+# ── System ──────────────────────────────────────────────────────────────────
+psutil>=5.9.0               # System info, process management
+screen-brightness-control>=0.22.0  # Display brightness
+
+# ── Clipboard & Input ───────────────────────────────────────────────────────
+pyperclip>=1.8.0            # Clipboard read/write
+keyboard>=0.13.5            # Hotkey listener
+
+# ── Config ──────────────────────────────────────────────────────────────────
+python-dotenv>=1.0.0        # .env file management

@@ -1,0 +1,362 @@
+"""
+╔═══════════════════════════════════════════════════════════════════════════════╗
+║                          NEXUS — main.py                                     ║
+║              Windows 11 AI Assistant • Core Orchestrator                      ║
+║                                                                              ║
+║  Entry point:  python main.py              (voice + text mode)               ║
+║                python main.py --text "…"   (text-only, no mic)               ║
+╚═══════════════════════════════════════════════════════════════════════════════╝
+
+Architecture:
+    1. Initialises the Gemini 2.5 Flash client with all Nexus tools.
+    2. Runs a transparent overlay (Gemini Live-style) showing current state.
+    3. Runs an async event loop with automatic multi-turn function calling.
+       - Gemini can chain tool calls to complete complex tasks.
+    4. Provides voice (hotkey -> mic -> transcribe) and text interfaces.
+    5. Every exchange is logged to episodic memory.
+"""
+
+import argparse
+import asyncio
+import logging
+import sys
+from typing import Optional
+
+import config
+from memory.episode_log import get_context_summary, log_episode
+from tools import TOOL_REGISTRY
+from ui.overlay import NexusOverlay
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(name)-22s | %(levelname)-7s | %(message)s",
+    datefmt="%H:%M:%S",
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
+logger = logging.getLogger("nexus.core")
+
+_BANNER = r"""
+    +========================================+
+    |     _   _                             |
+    |    | \ | | _____  ___   _ ___         |
+    |    |  \| |/ _ \ \/ / | | / __|        |
+    |    | |\  |  __/>  <| |_| \__ \        |
+    |    |_| \_|\___/_/\_\\__,_|___/        |
+    |                                        |
+    |    Windows 11 AI Assistant             |
+    |    Privacy-First . Local . Autonomous  |
+    +========================================+
+"""
+
+_client = None
+_overlay: Optional[NexusOverlay] = None
+
+
+def _get_client():
+    global _client
+    if _client is None:
+        if not config.GEMINI_API_KEY:
+            logger.critical("GEMINI_API_KEY is not set. Exiting.")
+            sys.exit(1)
+        from google import genai
+        _client = genai.Client(api_key=config.GEMINI_API_KEY)
+        logger.info("Gemini client initialised (model: %s).", config.GEMINI_MODEL)
+    return _client
+
+
+def _build_tool_map():
+    tool_map = {}
+    for func in TOOL_REGISTRY:
+        if callable(func):
+            tool_map[func.__name__] = func
+    return tool_map
+
+
+async def _process_message(user_text: str) -> str:
+    """Send to Gemini with automatic multi-turn function calling."""
+    from google.genai import types
+
+    client = _get_client()
+
+    context = get_context_summary(n=5)
+    system_instruction = config.SYSTEM_PROMPT
+    if context:
+        system_instruction += f"\n\n{context}"
+
+    generation_config = types.GenerateContentConfig(
+        system_instruction=system_instruction,
+        tools=TOOL_REGISTRY,
+        temperature=0.7,
+        max_output_tokens=4096,
+    )
+
+    tool_map = _build_tool_map()
+    contents: list = [user_text]
+    all_tools_used: set[str] = set()
+
+    for turn in range(config.MAX_FUNCTION_CALLING_TURNS):
+        try:
+            response = await client.aio.models.generate_content(
+                model=config.GEMINI_MODEL,
+                contents=contents,
+                config=generation_config,
+            )
+        except Exception as exc:
+            error_msg = f"Gemini error: {exc}"
+            logger.error(error_msg)
+            log_episode(user_input=user_text, assistant_response=error_msg)
+            if _overlay:
+                _overlay.set_state("error", str(exc))
+            return f"I hit an error: {exc}"
+
+        function_calls = []
+        text_parts = []
+
+        if response.candidates:
+            for candidate in response.candidates:
+                if candidate.content and candidate.content.parts:
+                    for part in candidate.content.parts:
+                        if part.function_call:
+                            function_calls.append(part.function_call)
+                        if part.text:
+                            text_parts.append(part.text)
+
+        if not function_calls:
+            reply = " ".join(text_parts) or response.text or ""
+            log_episode(
+                user_input=user_text,
+                assistant_response=reply,
+                tools_used=list(all_tools_used) if all_tools_used else None,
+            )
+            return reply
+
+        if response.candidates and response.candidates[0].content:
+            contents.append(response.candidates[0].content)
+
+        func_response_parts = []
+        for fc in function_calls:
+            func_name = fc.name
+            func_args = dict(fc.args) if fc.args else {}
+            all_tools_used.add(func_name)
+
+            logger.info("Tool call [turn %d]: %s(%s)", turn + 1, func_name, func_args)
+            if _overlay and turn == 0:
+                readable = func_name.replace("_", " ").title()
+                _overlay.set_state("processing", f"{readable}... ({func_args})")
+
+            if func_name in tool_map:
+                try:
+                    result = tool_map[func_name](**func_args)
+                except Exception as exc:
+                    result = f"Error executing {func_name}: {exc}"
+                    logger.error(result)
+            else:
+                result = f"Unknown tool: {func_name}"
+
+            func_response_parts.append(
+                types.Part.from_function_response(
+                    name=func_name,
+                    response={"result": result},
+                )
+            )
+
+        contents.append(
+            types.Content(
+                role="function",
+                parts=func_response_parts,
+            )
+        )
+
+    msg = "I reached the maximum number of steps. Please check progress and ask me to continue if needed."
+    log_episode(user_input=user_text, assistant_response=msg, tools_used=list(all_tools_used))
+    return msg
+
+
+async def _voice_loop() -> None:
+    import keyboard as kb
+    from perception.stt_engine import listen
+    from perception.tts_engine import speak
+
+    logger.info("Voice mode active. Press [%s] to speak. Ctrl+C to quit.", config.HOTKEY)
+    if _overlay:
+        _overlay.set_state("idle", "Press hotkey to speak")
+
+    await speak("Nexus online. Press the hotkey when you need me.")
+
+    loop = asyncio.get_running_loop()
+
+    while True:
+        hotkey_event = asyncio.Event()
+
+        def _on_hotkey():
+            loop.call_soon_threadsafe(hotkey_event.set)
+
+        kb.add_hotkey(config.HOTKEY, _on_hotkey, suppress=True)
+        try:
+            await hotkey_event.wait()
+        finally:
+            kb.remove_hotkey(config.HOTKEY)
+
+        logger.info("Hotkey pressed - listening...")
+        if _overlay:
+            _overlay.set_state("listening", "")
+
+        user_text = await listen()
+
+        if not user_text.strip():
+            logger.info("No speech detected, ignoring.")
+            if _overlay:
+                _overlay.set_state("idle", "No speech detected")
+            continue
+
+        if _overlay:
+            _overlay.set_state("transcribing", user_text)
+
+        logger.info("User said: %s", user_text)
+        print(f"\n  [You]: {user_text}")
+
+        if _overlay:
+            _overlay.set_state("processing", f'Processing: "{user_text}"')
+
+        reply = await _process_message(user_text)
+        print(f"  [Nexus]: {reply}\n")
+
+        if _overlay:
+            _overlay.set_state("speaking", reply)
+
+        await speak(reply)
+
+        if _overlay:
+            _overlay.set_state("idle", "Press hotkey to speak")
+
+
+async def _text_loop() -> None:
+    try:
+        from perception.tts_engine import speak
+        await speak("Nexus online in text mode.")
+        tts_available = True
+    except Exception:
+        tts_available = False
+        logger.info("TTS unavailable - running in silent text mode.")
+
+    logger.info("Text mode active. Type below. Ctrl+C to quit.")
+    loop = asyncio.get_running_loop()
+
+    if _overlay:
+        _overlay.set_state("idle", "Text mode - type your message")
+
+    while True:
+        try:
+            user_text = await loop.run_in_executor(None, lambda: input("\n  [You]: "))
+        except (EOFError, KeyboardInterrupt):
+            break
+
+        user_text = user_text.strip()
+        if not user_text:
+            continue
+
+        if user_text.lower() in {"exit", "quit", "bye"}:
+            farewell = "Nexus shutting down. Goodbye."
+            print(f"  [Nexus]: {farewell}")
+            if _overlay:
+                _overlay.set_state("speaking", farewell)
+            if tts_available:
+                try:
+                    await speak(farewell)
+                except Exception:
+                    pass
+            break
+
+        if _overlay:
+            _overlay.set_state("processing", user_text)
+
+        reply = await _process_message(user_text)
+        print(f"  [Nexus]: {reply}")
+
+        if _overlay:
+            _overlay.set_state("speaking", reply)
+
+        if tts_available:
+            try:
+                await speak(reply)
+            except Exception:
+                pass
+
+        if _overlay:
+            _overlay.set_state("idle", "Type your message")
+
+
+async def _single_shot(text: str) -> None:
+    logger.info("Single-shot: %.80s", text)
+    if _overlay:
+        _overlay.set_state("processing", text)
+    reply = await _process_message(text)
+    print(f"  [Nexus]: {reply}")
+    if _overlay:
+        _overlay.set_state("speaking", reply)
+    try:
+        from perception.tts_engine import speak
+        await speak(reply)
+    except Exception:
+        pass
+    if _overlay:
+        _overlay.set_state("idle", "")
+
+
+def main() -> None:
+    global _overlay
+
+    parser = argparse.ArgumentParser(
+        description="Nexus - Windows 11 AI Assistant",
+    )
+    parser.add_argument(
+        "--text",
+        type=str,
+        default=None,
+        help="Single text query (skips voice mode).",
+    )
+    parser.add_argument(
+        "--no-voice",
+        action="store_true",
+        help="Run in interactive text-only mode (no microphone).",
+    )
+    parser.add_argument(
+        "--no-overlay",
+        action="store_true",
+        help="Run without the transparent overlay UI.",
+    )
+    args = parser.parse_args()
+
+    print(_BANNER)
+    logger.info("Nexus initialising...")
+    logger.info("Tool registry: %d tools available.", len(TOOL_REGISTRY))
+
+    if not args.no_overlay:
+        try:
+            _overlay = NexusOverlay()
+            _overlay.start()
+            logger.info("Transparent overlay active.")
+        except Exception as exc:
+            logger.warning("Overlay failed to start: %s", exc)
+            _overlay = None
+
+    try:
+        if args.text:
+            asyncio.run(_single_shot(args.text))
+        elif args.no_voice:
+            asyncio.run(_text_loop())
+        else:
+            asyncio.run(_voice_loop())
+    except KeyboardInterrupt:
+        print("\n")
+        logger.info("Nexus terminated by user.")
+    except Exception as exc:
+        logger.critical("Fatal error: %s", exc, exc_info=True)
+        sys.exit(1)
+    finally:
+        if _overlay:
+            _overlay.stop()
+
+
+if __name__ == "__main__":
+    main()
