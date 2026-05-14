@@ -20,6 +20,7 @@ import argparse
 import asyncio
 import logging
 import sys
+import threading
 from typing import Optional
 
 import config
@@ -177,57 +178,62 @@ async def _voice_loop() -> None:
     from perception.stt_engine import listen
     from perception.tts_engine import speak
 
-    logger.info("Voice mode active. Press [%s] to speak. Ctrl+C to quit.", config.HOTKEY)
+    logger.info("Voice mode active. Press [%s] or click 🎤 to speak.", config.HOTKEY)
     if _overlay:
-        _overlay.set_state("idle", "Press hotkey to speak")
+        _overlay.set_state("idle", "Click 🎤 or press hotkey to speak")
 
-    await speak("Nexus online. Press the hotkey when you need me.")
+    await speak("Nexus online. Click the mic or press the hotkey when you need me.")
 
     loop = asyncio.get_running_loop()
+    hotkey_event = asyncio.Event()
 
-    while True:
-        hotkey_event = asyncio.Event()
+    def _trigger():
+        loop.call_soon_threadsafe(hotkey_event.set)
 
-        def _on_hotkey():
-            loop.call_soon_threadsafe(hotkey_event.set)
+    # Wire overlay mic button to the same event
+    if _overlay:
+        _overlay.set_mic_callback(_trigger)
 
-        kb.add_hotkey(config.HOTKEY, _on_hotkey, suppress=True)
-        try:
+    kb.add_hotkey(config.HOTKEY, _trigger, suppress=True)
+
+    try:
+        while True:
+            hotkey_event.clear()
             await hotkey_event.wait()
-        finally:
-            kb.remove_hotkey(config.HOTKEY)
 
-        logger.info("Hotkey pressed - listening...")
-        if _overlay:
-            _overlay.set_state("listening", "")
-
-        user_text = await listen()
-
-        if not user_text.strip():
-            logger.info("No speech detected, ignoring.")
+            logger.info("Triggered - listening...")
             if _overlay:
-                _overlay.set_state("idle", "No speech detected")
-            continue
+                _overlay.set_state("listening", "")
 
-        if _overlay:
-            _overlay.set_state("transcribing", user_text)
+            user_text = await listen()
 
-        logger.info("User said: %s", user_text)
-        print(f"\n  [You]: {user_text}")
+            if not user_text.strip():
+                logger.info("No speech detected, ignoring.")
+                if _overlay:
+                    _overlay.set_state("idle", "No speech detected")
+                continue
 
-        if _overlay:
-            _overlay.set_state("processing", f'Processing: "{user_text}"')
+            if _overlay:
+                _overlay.set_state("transcribing", user_text)
 
-        reply = await _process_message(user_text)
-        print(f"  [Nexus]: {reply}\n")
+            logger.info("User said: %s", user_text)
+            print(f"\n  [You]: {user_text}")
 
-        if _overlay:
-            _overlay.set_state("speaking", reply)
+            if _overlay:
+                _overlay.set_state("processing", f'Processing: "{user_text}"')
 
-        await speak(reply)
+            reply = await _process_message(user_text)
+            print(f"  [Nexus]: {reply}\n")
 
-        if _overlay:
-            _overlay.set_state("idle", "Press hotkey to speak")
+            if _overlay:
+                _overlay.set_state("speaking", reply)
+
+            await speak(reply)
+
+            if _overlay:
+                _overlay.set_state("idle", "Click 🎤 or press hotkey to speak")
+    finally:
+        kb.remove_hotkey(config.HOTKEY)
 
 
 async def _text_loop() -> None:
