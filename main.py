@@ -2,18 +2,11 @@
 ╔═══════════════════════════════════════════════════════════════════════════════╗
 ║                          NEXUS — main.py                                     ║
 ║              Windows 11 AI Assistant • Core Orchestrator                      ║
-║                                                                              ║
-║  Entry point:  python main.py              (voice + text mode)               ║
-║                python main.py --text "…"   (text-only, no mic)               ║
 ╚═══════════════════════════════════════════════════════════════════════════════╝
 
 Architecture:
-    1. Initialises the Gemini 2.5 Flash client with all Nexus tools.
-    2. Runs a transparent overlay (Gemini Live-style) showing current state.
-    3. Runs an async event loop with automatic multi-turn function calling.
-       - Gemini can chain tool calls to complete complex tasks.
-    4. Provides voice (hotkey -> mic -> transcribe) and text interfaces.
-    5. Every exchange is logged to episodic memory.
+    Qt overlay runs on the MAIN thread (required by Windows).
+    asyncio (Gemini, STT, TTS) runs in a background thread.
 """
 
 import argparse
@@ -26,7 +19,7 @@ from typing import Optional
 import config
 from memory.episode_log import get_context_summary, log_episode
 from tools import TOOL_REGISTRY
-from ui.overlay import NexusOverlay
+from ui.setup import run_setup_dialog
 
 logging.basicConfig(
     level=logging.INFO,
@@ -50,7 +43,7 @@ _BANNER = r"""
 """
 
 _client = None
-_overlay: Optional[NexusOverlay] = None
+_overlay = None  # set by main thread after Qt init
 _stop_event: threading.Event = threading.Event()
 
 
@@ -75,11 +68,8 @@ def _build_tool_map():
 
 
 async def _process_message(user_text: str) -> str:
-    """Send to Gemini with automatic multi-turn function calling."""
     from google.genai import types
-
     client = _get_client()
-
     context = get_context_summary(n=5)
     system_instruction = config.SYSTEM_PROMPT
     if context:
@@ -113,7 +103,6 @@ async def _process_message(user_text: str) -> str:
 
         function_calls = []
         text_parts = []
-
         if response.candidates:
             for candidate in response.candidates:
                 if candidate.content and candidate.content.parts:
@@ -125,11 +114,8 @@ async def _process_message(user_text: str) -> str:
 
         if not function_calls:
             reply = " ".join(text_parts) or response.text or ""
-            log_episode(
-                user_input=user_text,
-                assistant_response=reply,
-                tools_used=list(all_tools_used) if all_tools_used else None,
-            )
+            log_episode(user_input=user_text, assistant_response=reply,
+                        tools_used=list(all_tools_used) if all_tools_used else None)
             return reply
 
         if response.candidates and response.candidates[0].content:
@@ -140,12 +126,10 @@ async def _process_message(user_text: str) -> str:
             func_name = fc.name
             func_args = dict(fc.args) if fc.args else {}
             all_tools_used.add(func_name)
-
             logger.info("Tool call [turn %d]: %s(%s)", turn + 1, func_name, func_args)
             if _overlay and turn == 0:
                 readable = func_name.replace("_", " ").title()
                 _overlay.set_state("processing", f"{readable}... ({func_args})")
-
             if func_name in tool_map:
                 try:
                     result = tool_map[func_name](**func_args)
@@ -154,27 +138,28 @@ async def _process_message(user_text: str) -> str:
                     logger.error(result)
             else:
                 result = f"Unknown tool: {func_name}"
-
             func_response_parts.append(
-                types.Part.from_function_response(
-                    name=func_name,
-                    response={"result": result},
-                )
+                types.Part.from_function_response(name=func_name, response={"result": result})
             )
-
-        contents.append(
-            types.Content(
-                role="function",
-                parts=func_response_parts,
-            )
-        )
+        contents.append(types.Content(role="function", parts=func_response_parts))
 
     msg = "I reached the maximum number of steps. Please check progress and ask me to continue if needed."
     log_episode(user_input=user_text, assistant_response=msg, tools_used=list(all_tools_used))
     return msg
 
 
-async def _voice_loop() -> None:
+# ── Async entry point (runs in background thread) ──────────────────────────
+
+async def _async_main(args: argparse.Namespace):
+    if args.text:
+        await _single_shot(args.text)
+    elif args.no_voice:
+        await _text_loop()
+    else:
+        await _voice_loop()
+
+
+async def _voice_loop():
     import keyboard as kb
     from perception.stt_engine import listen
     from perception.tts_engine import speak
@@ -182,7 +167,6 @@ async def _voice_loop() -> None:
     logger.info("Voice mode active. Press [%s] or click 🎤 to speak.", config.HOTKEY)
     if _overlay:
         _overlay.set_state("idle", "Click 🎤 or press hotkey to speak")
-
     await speak("Nexus online. Click the mic or press the hotkey when you need me.")
 
     loop = asyncio.get_running_loop()
@@ -191,7 +175,6 @@ async def _voice_loop() -> None:
     def _trigger():
         loop.call_soon_threadsafe(hotkey_event.set)
 
-    # Wire overlay mic button to the same event
     if _overlay:
         _overlay.set_mic_callback(_trigger)
 
@@ -221,7 +204,6 @@ async def _voice_loop() -> None:
 
             if _overlay:
                 _overlay.set_state("transcribing", user_text)
-
             logger.info("User said: %s", user_text)
             print(f"\n  [You]: {user_text}")
 
@@ -236,32 +218,27 @@ async def _voice_loop() -> None:
                 continue
 
             print(f"  [Nexus]: {reply}\n")
-
             if _overlay:
                 _overlay.set_state("speaking", reply)
-
             await speak(reply)
             if _stop_event.is_set():
                 _stop_event.clear()
-
             if _overlay:
                 _overlay.set_state("idle", "Click 🎤 or press hotkey to speak")
     finally:
         kb.remove_hotkey(config.HOTKEY)
 
 
-async def _text_loop() -> None:
+async def _text_loop():
     try:
         from perception.tts_engine import speak
         await speak("Nexus online in text mode.")
         tts_available = True
     except Exception:
         tts_available = False
-        logger.info("TTS unavailable - running in silent text mode.")
 
     logger.info("Text mode active. Type below. Ctrl+C to quit.")
     loop = asyncio.get_running_loop()
-
     if _overlay:
         _overlay.set_state("idle", "Text mode - type your message")
 
@@ -270,11 +247,9 @@ async def _text_loop() -> None:
             user_text = await loop.run_in_executor(None, lambda: input("\n  [You]: "))
         except (EOFError, KeyboardInterrupt):
             break
-
         user_text = user_text.strip()
         if not user_text:
             continue
-
         if user_text.lower() in {"exit", "quit", "bye"}:
             farewell = "Nexus shutting down. Goodbye."
             print(f"  [Nexus]: {farewell}")
@@ -286,27 +261,22 @@ async def _text_loop() -> None:
                 except Exception:
                     pass
             break
-
         if _overlay:
             _overlay.set_state("processing", user_text)
-
         reply = await _process_message(user_text)
         print(f"  [Nexus]: {reply}")
-
         if _overlay:
             _overlay.set_state("speaking", reply)
-
         if tts_available:
             try:
                 await speak(reply)
             except Exception:
                 pass
-
         if _overlay:
             _overlay.set_state("idle", "Type your message")
 
 
-async def _single_shot(text: str) -> None:
+async def _single_shot(text: str):
     logger.info("Single-shot: %.80s", text)
     if _overlay:
         _overlay.set_state("processing", text)
@@ -323,46 +293,28 @@ async def _single_shot(text: str) -> None:
         _overlay.set_state("idle", "")
 
 
-def main() -> None:
+# ── Main entry (Qt on main thread) ─────────────────────────────────────────
+
+def main():
     global _overlay
 
-    parser = argparse.ArgumentParser(
-        description="Nexus - Windows 11 AI Assistant",
-    )
-    parser.add_argument(
-        "--text",
-        type=str,
-        default=None,
-        help="Single text query (skips voice mode).",
-    )
-    parser.add_argument(
-        "--no-voice",
-        action="store_true",
-        help="Run in interactive text-only mode (no microphone).",
-    )
-    parser.add_argument(
-        "--no-overlay",
-        action="store_true",
-        help="Run without the transparent overlay UI.",
-    )
-    parser.add_argument(
-        "--setup",
-        action="store_true",
-        help="Open the settings window to change API key or model.",
-    )
+    parser = argparse.ArgumentParser(description="Nexus - Windows 11 AI Assistant")
+    parser.add_argument("--text", type=str, default=None, help="Single text query.")
+    parser.add_argument("--no-voice", action="store_true", help="Text-only mode.")
+    parser.add_argument("--no-overlay", action="store_true", help="No overlay UI.")
+    parser.add_argument("--setup", action="store_true", help="Settings window.")
     args = parser.parse_args()
 
     print(_BANNER)
     logger.info("Nexus initialising...")
     logger.info("Tool registry: %d tools available.", len(TOOL_REGISTRY))
 
-    # ── Setup / API key check ────────────────────────────────────────────────
+    # ── Setup / API check ──────────────────────────────────────────────────
     if args.setup or not config.GEMINI_API_KEY or config.GEMINI_API_KEY.startswith("your_"):
         try:
-            from ui.setup import run_setup_dialog
             saved = run_setup_dialog()
             if not saved:
-                logger.info("Setup cancelled by user.")
+                logger.info("Setup cancelled.")
                 return
             import importlib
             importlib.reload(config)
@@ -371,11 +323,11 @@ def main() -> None:
                 return
         except Exception as exc:
             if args.setup:
-                logger.critical("Setup UI failed: %s", exc)
+                logger.critical("Setup failed: %s", exc)
                 return
-            logger.warning("Setup dialog failed, using .env: %s", exc)
+            logger.warning("Setup failed: %s", exc)
             if not config.GEMINI_API_KEY:
-                logger.critical("No GEMINI_API_KEY set. Create a .env file or run with --setup.")
+                logger.critical("No GEMINI_API_KEY. Run with --setup")
                 sys.exit(1)
 
     _stop_event.clear()
@@ -389,31 +341,58 @@ def main() -> None:
         except Exception:
             pass
 
+    # ── Start Qt overlay on MAIN thread ────────────────────────────────────
     if not args.no_overlay:
         try:
-            _overlay = NexusOverlay(stop_callback=_on_stop)
-            _overlay.start()
+            from PyQt6.QtWidgets import QApplication
+            from ui.overlay import NexusOverlayWindow
+            app = QApplication([])
+            app.setApplicationName("nexus-overlay")
+
+            def _mic_callback():
+                pass  # wired later by async thread
+
+            _overlay = NexusOverlayWindow(mic_callback=lambda: None, stop_callback=_on_stop)
+            _overlay.set_state("idle", "Starting...")
+            _overlay.show()
             logger.info("Orb overlay active.")
         except Exception as exc:
-            logger.warning("Overlay failed to start: %s", exc)
+            logger.warning("Overlay failed: %s", exc)
             _overlay = None
+            app = None
+    else:
+        app = None
 
+    # ── Start asyncio in a background thread ───────────────────────────────
+    async_exit = threading.Event()
+
+    def _run_async():
+        try:
+            asyncio.run(_async_main(args))
+        except Exception as exc:
+            logger.critical("Async error: %s", exc, exc_info=True)
+        finally:
+            async_exit.set()
+
+    async_thread = threading.Thread(target=_run_async, daemon=True, name="nexus-async")
+    async_thread.start()
+
+    # ── Qt event loop (main thread) ────────────────────────────────────────
     try:
-        if args.text:
-            asyncio.run(_single_shot(args.text))
-        elif args.no_voice:
-            asyncio.run(_text_loop())
+        if app:
+            app.exec()
         else:
-            asyncio.run(_voice_loop())
+            async_exit.wait()  # no overlay, just wait for async to finish
     except KeyboardInterrupt:
         print("\n")
         logger.info("Nexus terminated by user.")
     except Exception as exc:
-        logger.critical("Fatal error: %s", exc, exc_info=True)
+        logger.critical("Fatal: %s", exc, exc_info=True)
         sys.exit(1)
     finally:
         if _overlay:
-            _overlay.stop()
+            _overlay.close()
+        logger.info("Nexus shutdown complete.")
 
 
 if __name__ == "__main__":
