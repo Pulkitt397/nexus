@@ -63,14 +63,10 @@ cd nexus
 # 2. Install dependencies
 pip install -r requirements.txt
 
-# 3. Install Playwright browser engine
-python -m playwright install chromium
+# 3. Set up your API key (opens a GUI window)
+python main.py --setup
 
-# 4. Set up your API key
-copy .env.example .env
-# Then edit .env and paste your GEMINI_API_KEY
-
-# 5. (Optional) Install Tesseract OCR for screen text reading
+# 4. (Optional) Install Tesseract OCR for screen text reading
 # Download from: https://github.com/UB-Mannheim/tesseract/wiki
 ```
 

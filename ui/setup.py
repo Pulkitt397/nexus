@@ -201,7 +201,7 @@ def run_setup_dialog() -> bool:
 
     # ── Buttons ─────────────────────────────────────────────────────────────
     btn_frame = tk.Frame(root, bg="#0f0f1a")
-    btn_frame.pack(fill="x", pady=(20, 0), **padding)
+    btn_frame.pack(fill="x", pady=(20, 0), padx=24)
 
     cancel_btn = tk.Button(btn_frame, text="Cancel", command=on_cancel,
                            font=("Segoe UI", 10), bg="#1a1a2e", fg="#808090",

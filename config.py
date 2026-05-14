@@ -7,12 +7,6 @@ _PROJECT_ROOT = Path(__file__).resolve().parent
 load_dotenv(_PROJECT_ROOT / ".env")
 
 GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
-if not GEMINI_API_KEY:
-    print(
-        "[NEXUS FATAL] GEMINI_API_KEY is not set. "
-        "Create a .env file from .env.example and add your key.",
-        file=sys.stderr,
-    )
 
 GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash") or "gemini-2.5-flash"
 
