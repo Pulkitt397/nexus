@@ -185,14 +185,17 @@ def run_setup_dialog() -> bool:
 
     model_menu.bind("<<ComboboxSelected>>", on_model_select)
 
-    # Set default selection
+    # Set default selection — must set model_var to the ID, not display string
     current_model = load_env_model()
     for mid, display in AVAILABLE_MODELS:
         if mid == current_model:
             model_menu.set(display)
+            model_var.set(mid)
             break
     else:
-        model_menu.set(AVAILABLE_MODELS[0][1])
+        default_mid, default_display = AVAILABLE_MODELS[0]
+        model_menu.set(default_display)
+        model_var.set(default_mid)
 
     note = tk.Label(root,
                     text="All models above are free via Google AI Studio.\nNo credit card needed.",

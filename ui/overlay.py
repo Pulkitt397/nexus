@@ -1,397 +1,379 @@
 """
-Nexus Orb Overlay — Transparent floating card with animated orb + mic button.
+Nexus Orb Overlay — Floating transparent card with animated orb.
 
-Appears at top-center of screen. Shows a live orb animation that changes
-with Nexus state: idle → listening → processing → speaking.
-Includes a clickable mic button and hotkey support.
+Built with PyQt6 for per-pixel alpha, smooth animations, and gradients.
+State changes via thread-safe queue polling (QTimer).
 """
 
 import logging
 import math
 import queue
 import threading
-import tkinter as tk
 from typing import Optional
+
+from PyQt6.QtCore import Qt, QTimer, pyqtSlot
+from PyQt6.QtGui import (
+    QBrush, QColor, QConicalGradient, QFont, QLinearGradient, QPainter,
+    QPainterPath, QRadialGradient, QRegion,
+)
+from PyQt6.QtWidgets import (
+    QApplication, QGraphicsDropShadowEffect, QGraphicsEllipseItem,
+    QGraphicsScene, QGraphicsView, QHBoxLayout, QLabel, QPushButton,
+    QVBoxLayout, QWidget,
+)
 
 import config
 
 logger = logging.getLogger("nexus.ui.overlay")
 
-# ── Palette ──────────────────────────────────────────────────────────────────
-_BG = "#0a0a14"
-_FG = "#e8e8f0"
-_FG_DIM = "#808098"
-_FG_STATUS = "#606080"
+_CARD_W = 380
+_CARD_H_IDLE = 195
+_CARD_H_ACTIVE = 275
 
-_ORB_COLORS = {
-    "idle":      {"a": "#4ade80", "b": "#86efac", "c": "#166534", "r": 22},
-    "listening": {"a": "#60a5fa", "b": "#93c5fd", "c": "#1e3a5f", "r": 28},
-    "processing": {"a": "#a78bfa", "b": "#c4b5fd", "c": "#3b0764", "r": 26},
-    "speaking":  {"a": "#22d3ee", "b": "#67e8f9", "c": "#083344", "r": 28},
-    "error":     {"a": "#f87171", "b": "#fca5a5", "c": "#450a0a", "r": 24},
+_COLORS = {
+    "idle":      {"a": QColor(74, 222, 128), "b": QColor(134, 239, 172), "c": QColor(22, 101, 52)},
+    "listening": {"a": QColor(96, 165, 250), "b": QColor(147, 197, 253), "c": QColor(30, 58, 95)},
+    "transcribing": {"a": QColor(96, 165, 250), "b": QColor(147, 197, 253), "c": QColor(30, 58, 95)},
+    "processing": {"a": QColor(167, 139, 250), "b": QColor(196, 181, 253), "c": QColor(59, 7, 100)},
+    "speaking":  {"a": QColor(34, 211, 238), "b": QColor(103, 232, 249), "c": QColor(8, 51, 68)},
+    "error":     {"a": QColor(248, 113, 113), "b": QColor(252, 165, 165), "c": QColor(69, 10, 10)},
 }
 
-_CARD_W = 380
-_CARD_H_IDLE = 180
-_CARD_H_ACTIVE = 260
+_STATUS_TEXT = {
+    "idle": "Nexus Ready",
+    "listening": "Listening...",
+    "transcribing": "Got it!",
+    "processing": "Thinking...",
+    "speaking": "Speaking...",
+    "error": "Error",
+}
+
+
+class OrbView(QGraphicsView):
+    """Canvas that draws the animated orb."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._scene = QGraphicsScene(self)
+        self.setScene(self._scene)
+        self.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setStyleSheet("background: transparent;")
+        self.setFixedSize(110, 110)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.state = "idle"
+        self.phase = 0
+        self._items = []
+
+    def set_state(self, state: str):
+        self.state = state
+
+    def tick(self):
+        self.phase += 1
+        self._scene.clear()
+        self._draw(self.state, self.phase)
+
+    def _draw(self, state: str, phase: int):
+        pal = _COLORS.get(state, _COLORS["idle"])
+        cx, cy = 55, 55
+        t = phase * 0.06
+        s = math.sin
+
+        if state == "idle":
+            pulse = 1 + 0.03 * s(t * 1.2)
+            r = int(22 * pulse)
+            self._circle(cx, cy, r + 14, pal["b"], 3, 60)
+            self._circle(cx, cy, r + 7, pal["b"], 1, 40)
+            self._circle(cx, cy, r, pal["a"], 0, 255)
+
+        elif state in ("listening", "transcribing"):
+            for i in range(4):
+                offset = (phase + i * 15) % 50
+                rr = 28 + offset * 1.8
+                width = max(1, 4 - i)
+                fade = max(0, 1 - offset / 50)
+                if fade > 0.15:
+                    c2 = QColor(pal["b"])
+                    c2.setAlphaF(fade)
+                    self._circle(cx, cy, rr, c2, int(width), 0)
+            pulse = 1 + 0.06 * s(t * 3)
+            r = int(28 * pulse)
+            self._circle(cx, cy, r, pal["a"], 0, 255)
+            self._circle(cx, cy, 6, QColor(255, 255, 255), 0, 200)
+
+        elif state == "processing":
+            for i in range(3):
+                start = (phase * 4 + i * 120) / 57.3
+                rr = 26 + 6 + 4 * s(t * 2 + i)
+                self._arc(cx, cy, rr, start, 1.4, pal["b"])
+            pulse = 1 + 0.04 * s(t * 2.5)
+            r = int(26 * pulse)
+            self._circle(cx, cy, r, pal["a"], 0, 255)
+
+        elif state == "speaking":
+            for i in range(6):
+                angle = i * 1.047 + t * 2
+                bar_len = 8 + 12 * abs(s(t * 4 + i * 0.8))
+                bx = cx + math.cos(angle) * (28 + 8)
+                by = cy + math.sin(angle) * (28 + 8)
+                ex = cx + math.cos(angle) * (28 + 8 + bar_len)
+                ey = cy + math.sin(angle) * (28 + 8 + bar_len)
+                pen = self._scene.addLine(bx, by, ex, ey, pal["b"])
+                pen.setPenWidth(3)
+            pulse = 1 + 0.05 * s(t * 5)
+            r = int(28 * pulse)
+            self._circle(cx, cy, r, pal["a"], 0, 255)
+            self._circle(cx, cy, 5, QColor(255, 255, 255), 0, 200)
+
+        elif state == "error":
+            pulse = 1 + 0.04 * s(t * 1.5)
+            r = int(24 * pulse)
+            self._circle(cx, cy, r + 8, pal["b"], 2, 60)
+            self._circle(cx, cy, r, pal["a"], 0, 255)
+
+    def _circle(self, cx, cy, r, color, border_width, alpha):
+        c = QColor(color)
+        if alpha < 255:
+            c.setAlpha(alpha)
+        item = self._scene.addEllipse(cx - r, cy - r, r * 2, r * 2, QBrush(c) if border_width == 0 else QBrush())
+        if border_width > 0:
+            item.setPen(c)
+            item.setBrush(QBrush())
+        else:
+            item.setBrush(QBrush(c))
+
+    def _arc(self, cx, cy, r, start_angle, extent, color):
+        rect_size = r * 2
+        item = self._scene.addArc(
+            cx - r, cy - r, rect_size, rect_size,
+            int(start_angle * 16 * 57.3),
+            int(extent * 16 * 57.3),
+            color,
+        )
+        item.setPenWidth(3)
+
+
+class NexusOverlayWindow(QWidget):
+    """Frameless, transparent, always-on-top overlay window."""
+
+    def __init__(self, mic_callback=None, stop_callback=None):
+        super().__init__()
+        self._mic_callback = mic_callback or (lambda: None)
+        self._stop_callback = stop_callback or (lambda: None)
+        self._state = "idle"
+        self._expanded = False
+
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+
+        self._setup_ui()
+        self._position(compact=True)
+        self._show_stop_btn(False)
+
+        self._anim_timer = QTimer(self)
+        self._anim_timer.timeout.connect(self._tick_orb)
+        self._anim_timer.start(35)
+
+    def set_mic_callback(self, cb):
+        self._mic_callback = cb
+
+    def set_stop_callback(self, cb):
+        self._stop_callback = cb
+
+    # ── UI building ─────────────────────────────────────────────────────────
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        # Orb
+        self.orb = OrbView(self)
+        layout.addWidget(self.orb, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        # Status
+        self.status_label = QLabel("Nexus Ready")
+        self.status_label.setFont(QFont("Segoe UI", 13, QFont.Weight.Bold))
+        self.status_label.setStyleSheet("color: #e8e8f0;")
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.status_label)
+
+        # Detail text
+        self.text_label = QLabel("")
+        self.text_label.setFont(QFont("Segoe UI", 9))
+        self.text_label.setStyleSheet("color: #808098;")
+        self.text_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.text_label.setWordWrap(True)
+        self.text_label.setMaximumWidth(_CARD_W - 48)
+        layout.addWidget(self.text_label)
+
+        layout.addSpacing(6)
+
+        # Buttons
+        btn_row = QHBoxLayout()
+        btn_row.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        btn_row.setSpacing(10)
+
+        self.mic_btn = QPushButton("🎤")
+        self.mic_btn.setFixedSize(48, 40)
+        self.mic_btn.setStyleSheet(self._btn_style("#1a1a2e", "#e8e8f0"))
+        self.mic_btn.clicked.connect(self._on_mic_click)
+        btn_row.addWidget(self.mic_btn)
+
+        self.stop_btn = QPushButton("⏹")
+        self.stop_btn.setFixedSize(48, 40)
+        self.stop_btn.setStyleSheet(self._btn_style("#2a1a1a", "#f87171"))
+        self.stop_btn.clicked.connect(self._on_stop_click)
+        btn_row.addWidget(self.stop_btn)
+
+        gear_btn = QPushButton("⚙️")
+        gear_btn.setFixedSize(48, 40)
+        gear_btn.setStyleSheet(self._btn_style("transparent", "#606080"))
+        gear_btn.clicked.connect(self._on_gear_click)
+        btn_row.addWidget(gear_btn)
+
+        layout.addLayout(btn_row)
+        layout.addSpacing(12)
+
+    @staticmethod
+    def _btn_style(bg, fg):
+        return (
+            f"QPushButton {{ background: {bg}; color: {fg}; font-size: 20px; "
+            f"border-radius: 8px; padding: 0px; }}"
+            f"QPushButton:hover {{ background: #2a2a3e; }}"
+        )
+
+    # ── Positioning ─────────────────────────────────────────────────────────
+
+    def _position(self, compact: bool = True):
+        screen = QApplication.primaryScreen()
+        if not screen:
+            return
+        geo = screen.availableGeometry()
+        h = _CARD_H_IDLE if compact else _CARD_H_ACTIVE
+        x = (geo.width() - _CARD_W) // 2 + geo.x()
+        y = geo.y() + 16
+        self.setFixedSize(_CARD_W, h)
+        self.move(x, y)
+        self._expanded = not compact
+
+        # Rounded corners mask
+        path = QPainterPath()
+        path.addRoundedRect(0, 0, _CARD_W, h, 18, 18)
+        self.setMask(QRegion(path.toFillPolygon().toPolygon()))
+
+    # ── State ───────────────────────────────────────────────────────────────
+
+    @pyqtSlot(str, str)
+    def set_state(self, state: str, text: str = ""):
+        self._state = state
+        self.orb.set_state(state)
+
+        expanded = state != "idle"
+        if expanded != self._expanded:
+            self.text_label.setVisible(expanded)
+            self._position(compact=not expanded)
+
+        pal = _COLORS.get(state, _COLORS["idle"])
+        label = _STATUS_TEXT.get(state, "Nexus Ready")
+        self.status_label.setText(label)
+        self.status_label.setStyleSheet(f"color: {pal['a'].name()};")
+        self.text_label.setText(text)
+        self.text_label.setStyleSheet(
+            f"color: {'#e8e8f0' if state == 'speaking' else '#808098'};"
+        )
+
+        self._show_stop_btn(state in ("listening", "transcribing", "processing", "speaking"))
+        self.orb.tick()
+
+    def _show_stop_btn(self, show: bool):
+        self.stop_btn.setVisible(show)
+
+    def _tick_orb(self):
+        self.orb.tick()
+
+    # ── Button handlers ─────────────────────────────────────────────────────
+
+    def _on_mic_click(self):
+        self.mic_btn.setStyleSheet(self._btn_style("#2563eb", "white"))
+        QTimer.singleShot(200, lambda: self.mic_btn.setStyleSheet(self._btn_style("#1a1a2e", "#e8e8f0")))
+        self._mic_callback()
+
+    def _on_stop_click(self):
+        self._stop_callback()
+        self.set_state("idle", "Stopped")
+
+    def _on_gear_click(self):
+        import subprocess, sys
+        subprocess.Popen(
+            [sys.executable, "-m", "ui.setup_launcher"],
+            cwd=str(config._PROJECT_ROOT),
+        )
 
 
 class NexusOverlay:
-    """
-    Floating transparent card at top-center of screen with animated orb.
-
-    States: idle | listening | transcribing | processing | speaking | error | hidden
-    """
+    """Thread-safe wrapper that runs the PyQt6 overlay in a daemon thread."""
 
     def __init__(self, mic_callback=None, stop_callback=None):
         self._cmd_queue: queue.Queue = queue.Queue()
         self._thread: Optional[threading.Thread] = None
-        self._root: Optional[tk.Tk] = None
-        self._mic_callback: callable = mic_callback or (lambda: None)
-        self._stop_callback: callable = stop_callback or (lambda: None)
-        self._state = "idle"
-        self._text = ""
-        self._anim_phase = 0
-        self._expanded = False
+        self._app: Optional[QApplication] = None
+        self._window: Optional[NexusOverlayWindow] = None
+        self._mic_callback = mic_callback
+        self._stop_callback = stop_callback
 
-        # Widgets
-        self._frame = None
-        self._orb_canvas: Optional[tk.Canvas] = None
-        self._status_label: Optional[tk.Label] = None
-        self._text_label: Optional[tk.Label] = None
-        self._mic_btn: Optional[tk.Label] = None
-        self._stop_btn: Optional[tk.Label] = None
-        self._bottom_frame: Optional[tk.Frame] = None
-
-    def set_mic_callback(self, cb: callable) -> None:
+    def set_mic_callback(self, cb):
         self._mic_callback = cb
+        if self._window:
+            self._window.set_mic_callback(cb)
 
-    def set_stop_callback(self, cb: callable) -> None:
+    def set_stop_callback(self, cb):
         self._stop_callback = cb
+        if self._window:
+            self._window.set_stop_callback(cb)
 
-    # ── Public API ───────────────────────────────────────────────────────────
-
-    def start(self) -> None:
+    def start(self):
         if self._thread and self._thread.is_alive():
             return
         self._thread = threading.Thread(target=self._run, daemon=True, name="nexus-overlay")
         self._thread.start()
-        logger.info("Orb overlay started.")
+        logger.info("PyQt6 orb overlay started.")
 
-    def stop(self) -> None:
-        self._cmd_queue.put(("__exit__", ""))
+    def stop(self):
+        if self._app:
+            self._app.quit()
         logger.info("Orb overlay stopped.")
 
-    def set_state(self, state: str, text: str = "") -> None:
+    def set_state(self, state: str, text: str = ""):
         self._cmd_queue.put((state, text))
 
-    # ── Internal: tkinter loop ───────────────────────────────────────────────
+    def _run(self):
+        self._app = QApplication([])
+        self._app.setApplicationName("nexus-overlay")
+        self._window = NexusOverlayWindow(self._mic_callback, self._stop_callback)
+        self._window.set_state("idle", "")
+        self._window.show()
 
-    def _run(self) -> None:
-        self._root = tk.Tk()
-        self._root.title("nexus-overlay")
-        self._root.overrideredirect(True)
-        self._root.attributes("-topmost", True)
-        self._root.attributes("-alpha", 0.82)
-        self._root.configure(bg=_BG)
-        self._root.resizable(False, False)
+        # Poll queue
+        poll_timer = QTimer()
+        poll_timer.timeout.connect(self._poll)
+        poll_timer.start(100)
 
-        # Click-through
-        try:
-            import ctypes
-            hwnd = ctypes.windll.user32.FindWindowW(None, "nexus-overlay")
-            if hwnd:
-                WS_EX_LAYERED = 0x80000
-                WS_EX_TRANSPARENT = 0x20
-                WS_EX_TOOLWINDOW = 0x80
-                ctypes.windll.user32.SetWindowLongW(
-                    hwnd, -20, WS_EX_LAYERED | WS_EX_TOOLWINDOW
-                )
-        except Exception:
-            pass
+        self._app.exec()
 
-        try:
-            import ctypes
-            ctypes.windll.shcore.SetProcessDpiAwareness(2)
-        except Exception:
-            pass
-
-        self._position_window(compact=True)
-        self._build_ui()
-        self._set_state_internal("idle", "")
-        self._animate()
-        self._poll_queue()
-        self._root.mainloop()
-
-    def _position_window(self, compact: bool = True) -> None:
-        if not self._root:
-            return
-        screen_w = self._root.winfo_screenwidth()
-        h = _CARD_H_IDLE if compact else _CARD_H_ACTIVE
-        x = (screen_w - _CARD_W) // 2
-        y = 16
-        self._root.geometry(f"{_CARD_W}x{h}+{x}+{y}")
-        self._expanded = not compact
-
-        # Rounded corners
-        try:
-            import ctypes
-            hwnd = ctypes.windll.user32.FindWindowW(None, "nexus-overlay")
-            if hwnd:
-                rgn = ctypes.windll.gdi32.CreateRoundRectRgn(0, 0, _CARD_W + 1, h + 1, 18, 18)
-                ctypes.windll.user32.SetWindowRgn(hwnd, rgn, True)
-        except Exception:
-            pass
-
-    # ── Build UI ─────────────────────────────────────────────────────────────
-
-    def _build_ui(self) -> None:
-        self._frame = tk.Frame(self._root, bg=_BG, highlightthickness=0)
-        self._frame.pack(fill="both", expand=True)
-
-        # ── Orb canvas ───────────────────────────────────────────────────────
-        self._orb_canvas = tk.Canvas(
-            self._frame, width=100, height=100,
-            bg=_BG, highlightthickness=0,
-        )
-        self._orb_canvas.pack(pady=(12, 2))
-
-        # ── Status text ──────────────────────────────────────────────────────
-        self._status_label = tk.Label(
-            self._frame, text="Nexus Ready",
-            font=("Segoe UI", 13, "bold"), fg=_FG, bg=_BG,
-        )
-        self._status_label.pack()
-
-        # ── Detail text ──────────────────────────────────────────────────────
-        self._text_label = tk.Label(
-            self._frame, text="",
-            font=("Segoe UI", 9), fg=_FG_DIM, bg=_BG,
-            wraplength=_CARD_W - 48, justify="center",
-        )
-
-        # ── Bottom row: mic + stop + gear ────────────────────────────────────
-        self._bottom_frame = tk.Frame(self._frame, bg=_BG)
-        self._bottom_frame.pack(side="bottom", pady=(0, 12))
-
-        self._mic_btn = tk.Label(
-            self._bottom_frame, text="🎤", font=("Segoe UI", 22),
-            fg=_FG, bg="#1a1a2e", cursor="hand2",
-            relief="flat", padx=10, pady=4,
-        )
-        self._mic_btn.pack(side="left", padx=6)
-        self._mic_btn.bind("<Button-1>", lambda e: self._on_mic_click())
-        self._mic_btn.bind("<Enter>", lambda e: self._mic_btn.configure(bg="#2a2a3e"))
-        self._mic_btn.bind("<Leave>", lambda e: self._mic_btn.configure(bg="#1a1a2e"))
-
-        self._stop_btn = tk.Label(
-            self._bottom_frame, text="⏹", font=("Segoe UI", 16, "bold"),
-            fg="#f87171", bg="#2a1a1a", cursor="hand2",
-            relief="flat", padx=12, pady=4,
-        )
-        self._stop_btn.bind("<Button-1>", lambda e: self._on_stop_click())
-        self._stop_btn.bind("<Enter>", lambda e: self._stop_btn.configure(bg="#3a1a1a"))
-        self._stop_btn.bind("<Leave>", lambda e: self._stop_btn.configure(bg="#2a1a1a"))
-
-        gear = tk.Label(
-            self._bottom_frame, text="⚙️", font=("Segoe UI", 14),
-            fg=_FG_DIM, bg=_BG, cursor="hand2",
-        )
-        gear.pack(side="left", padx=6)
-        gear.bind("<Button-1>", lambda e: self._on_gear_click())
-        gear.bind("<Enter>", lambda e: gear.configure(fg=_FG))
-        gear.bind("<Leave>", lambda e: gear.configure(fg=_FG_DIM))
-
-        # Collapsed by default
-        self._text_label.pack_forget()
-
-    # ── Mic button ───────────────────────────────────────────────────────────
-
-    def _on_mic_click(self) -> None:
-        self._flash_mic()
-        self._mic_callback()
-
-    def _flash_mic(self) -> None:
-        """Briefly highlight the mic button."""
-        try:
-            self._mic_btn.configure(bg="#2563eb", fg="white")
-            self._root.after(200, lambda: self._mic_btn.configure(bg="#1a1a2e", fg=_FG))
-        except Exception:
-            pass
-
-    def _on_stop_click(self) -> None:
-        self._stop_callback()
-
-    def _toggle_stop_btn(self, state: str) -> None:
-        """Show stop button only when active (listening/processing/speaking)."""
-        if not self._stop_btn or not self._bottom_frame:
-            return
-        visible = state in ("listening", "transcribing", "processing", "speaking")
-        if visible:
-            self._stop_btn.pack(side="left", padx=6, before=self._bottom_frame.winfo_children()[-1])
-        else:
-            self._stop_btn.pack_forget()
-
-    def _on_gear_click(self) -> None:
-        """Open setup by launching a subprocess."""
-        import subprocess
-        import sys
-        subprocess.Popen(
-            [sys.executable, "-m", "ui.setup_launcher"],
-            cwd=str(__import__("config")._PROJECT_ROOT),
-        )
-
-    # ── Orb animation ────────────────────────────────────────────────────────
-
-    def _animate(self) -> None:
-        if not self._root:
-            return
-        self._anim_phase += 1
-        self._draw_orb(self._state, self._anim_phase)
-        try:
-            self._root.after(40, self._animate)
-        except tk.TclError:
-            pass
-
-    def _draw_orb(self, state: str, phase: int) -> None:
-        c = self._orb_canvas
-        if not c:
-            return
-        c.delete("all")
-        cx, cy = 50, 50
-        pal = _ORB_COLORS.get(state, _ORB_COLORS["idle"])
-        t = phase * 0.06
-        sin = math.sin
-
-        if state == "idle":
-            pulse = 1 + 0.03 * sin(t * 1.2)
-            r = int(pal["r"] * pulse)
-            self._draw_glow(c, cx, cy, r + 12, pal["b"], 2)
-            self._draw_glow(c, cx, cy, r + 6, pal["b"], 1)
-            c.create_oval(cx - r, cy - r, cx + r, cy + r, fill=pal["a"], outline="")
-
-        elif state in ("listening", "transcribing"):
-            # Radiating rings
-            for i in range(4):
-                offset = (phase + i * 15) % 50
-                r = pal["r"] + offset * 1.8
-                width = max(1, 4 - i)
-                fade = 1 - offset / 50
-                if fade > 0.15:
-                    c.create_oval(
-                        cx - r, cy - r, cx + r, cy + r,
-                        outline=pal["b"], width=width,
-                    )
-            pulse = 1 + 0.06 * sin(t * 3)
-            r = int(pal["r"] * pulse)
-            c.create_oval(cx - r, cy - r, cx + r, cy + r, fill=pal["a"], outline="")
-            # Center bright spot
-            c.create_oval(cx - 6, cy - 6, cx + 6, cy + 6, fill="white", outline="")
-
-        elif state == "processing":
-            # Spinning arcs
-            for i in range(3):
-                start = (phase * 4 + i * 120) % 360
-                r = pal["r"] + 6 + 4 * sin(t * 2 + i)
-                c.create_arc(
-                    cx - r, cy - r, cx + r, cy + r,
-                    start=start, extent=80,
-                    outline=pal["b"], width=3,
-                )
-            pulse = 1 + 0.04 * sin(t * 2.5)
-            r = int(pal["r"] * pulse)
-            c.create_oval(cx - r, cy - r, cx + r, cy + r, fill=pal["a"], outline="")
-
-        elif state == "speaking":
-            # Wave bars around orb
-            for i in range(6):
-                angle = i * 1.047 + t * 2
-                bar_len = 8 + 12 * abs(sin(t * 4 + i * 0.8))
-                bx = cx + math.cos(angle) * (pal["r"] + 8)
-                by = cy + math.sin(angle) * (pal["r"] + 8)
-                ex = cx + math.cos(angle) * (pal["r"] + 8 + bar_len)
-                ey = cy + math.sin(angle) * (pal["r"] + 8 + bar_len)
-                c.create_line(bx, by, ex, ey, fill=pal["b"], width=3, capstyle="round")
-            pulse = 1 + 0.05 * sin(t * 5)
-            r = int(pal["r"] * pulse)
-            c.create_oval(cx - r, cy - r, cx + r, cy + r, fill=pal["a"], outline="")
-            c.create_oval(cx - 5, cy - 5, cx + 5, cy + 5, fill="white", outline="")
-
-        elif state == "error":
-            pulse = 1 + 0.04 * sin(t * 1.5)
-            r = int(pal["r"] * pulse)
-            c.create_oval(cx - r - 8, cy - r - 8, cx + r + 8, cy + r + 8,
-                          outline=pal["b"], width=2)
-            c.create_oval(cx - r, cy - r, cx + r, cy + r, fill=pal["a"], outline="")
-
-    @staticmethod
-    def _draw_glow(c: tk.Canvas, cx: int, cy: int, r: int, color: str, width: int) -> None:
-        c.create_oval(cx - r, cy - r, cx + r, cy + r, outline=color, width=width)
-
-    # ── State machine ────────────────────────────────────────────────────────
-
-    def _set_state_internal(self, state: str, text: str) -> None:
-        self._state = state
-        self._toggle_stop_btn(state)
-
-        if state == "hidden":
-            if self._root:
-                self._root.withdraw()
-            return
-
-        if self._root:
-            self._root.deiconify()
-
-        expanded = state != "idle"
-
-        if expanded != self._expanded:
-            if expanded:
-                self._text_label.pack(pady=(2, 0))
-            else:
-                self._text_label.pack_forget()
-            self._position_window(compact=not expanded)
-
-        pal = _ORB_COLORS.get(state, _ORB_COLORS["idle"])
-        status_map = {
-            "idle": "Nexus Ready",
-            "listening": "Listening...",
-            "transcribing": "Got it!",
-            "processing": "Thinking...",
-            "speaking": "Speaking...",
-            "error": "Error",
-        }
-        label = status_map.get(state, "Nexus Ready")
-        self._status_label.config(text=label, fg=pal["a"])
-        self._text_label.config(text=text)
-
-        # Mic button color
-        mic_fg = pal["a"] if state != "idle" else _FG
-        try:
-            self._mic_btn.config(fg=mic_fg)
-        except Exception:
-            pass
-
-        # Auto-idle after speaking
-        if state == "speaking" and text:
-            self._text_label.config(fg=_FG)
-
-    # ── Queue polling ────────────────────────────────────────────────────────
-
-    def _poll_queue(self) -> None:
-        if not self._root:
+    def _poll(self):
+        if not self._window:
             return
         try:
             while True:
                 state, text = self._cmd_queue.get_nowait()
-                if state == "__exit__":
-                    self._root.quit()
-                    self._root.destroy()
-                    return
-                self._set_state_internal(state, text)
+                self._window.set_state(state, text)
         except queue.Empty:
             pass
-        finally:
-            try:
-                self._root.after(100, self._poll_queue)
-            except tk.TclError:
-                pass

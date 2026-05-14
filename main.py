@@ -383,9 +383,9 @@ def main() -> None:
     def _on_stop():
         _stop_event.set()
         try:
-            from perception.tts_engine import stop_speaking
-            import asyncio
-            asyncio.run_coroutine_threadsafe(stop_speaking(), asyncio.get_event_loop())
+            import ctypes
+            ctypes.windll.winmm.mciSendStringW("stop nexus_tts", None, 0, 0)
+            ctypes.windll.winmm.mciSendStringW("close nexus_tts", None, 0, 0)
         except Exception:
             pass
 

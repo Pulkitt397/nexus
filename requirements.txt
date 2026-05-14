@@ -34,5 +34,8 @@ screen-brightness-control>=0.22.0  # Display brightness
 pyperclip>=1.8.0            # Clipboard read/write
 keyboard>=0.13.5            # Hotkey listener
 
+# ── UI Overlay ─────────────────────────────────────────────────────────────
+PyQt6>=6.5.0                # Transparent overlay with animated orb
+
 # ── Config ──────────────────────────────────────────────────────────────────
 python-dotenv>=1.0.0        # .env file management
