@@ -325,11 +325,38 @@ def main() -> None:
         action="store_true",
         help="Run without the transparent overlay UI.",
     )
+    parser.add_argument(
+        "--setup",
+        action="store_true",
+        help="Open the settings window to change API key or model.",
+    )
     args = parser.parse_args()
 
     print(_BANNER)
     logger.info("Nexus initialising...")
     logger.info("Tool registry: %d tools available.", len(TOOL_REGISTRY))
+
+    # ── Setup / API key check ────────────────────────────────────────────────
+    if args.setup or not config.GEMINI_API_KEY or config.GEMINI_API_KEY.startswith("your_"):
+        try:
+            from ui.setup import run_setup_dialog
+            saved = run_setup_dialog()
+            if not saved:
+                logger.info("Setup cancelled by user.")
+                return
+            import importlib
+            importlib.reload(config)
+            if args.setup:
+                logger.info("Configuration updated.")
+                return
+        except Exception as exc:
+            if args.setup:
+                logger.critical("Setup UI failed: %s", exc)
+                return
+            logger.warning("Setup dialog failed, using .env: %s", exc)
+            if not config.GEMINI_API_KEY:
+                logger.critical("No GEMINI_API_KEY set. Create a .env file or run with --setup.")
+                sys.exit(1)
 
     if not args.no_overlay:
         try:

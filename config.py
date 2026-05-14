@@ -14,7 +14,7 @@ if not GEMINI_API_KEY:
         file=sys.stderr,
     )
 
-GEMINI_MODEL: str = "gemini-2.5-flash"
+GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash") or "gemini-2.5-flash"
 
 WHISPER_MODEL: str = "base"
 WHISPER_DEVICE: str = "cpu"
