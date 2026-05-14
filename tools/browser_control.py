@@ -41,7 +41,6 @@ def _ensure_browser():
     # Try system browsers in order: Chrome, Edge, Brave, then bundled Chromium
     browser_candidates = [
         ("chrome", None),
-        ("msedge", None),
         ("brave", r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe"),
         ("brave", r"C:\Program Files (x86)\BraveSoftware\Brave-Browser\Application\brave.exe"),
         (None, None),  # bundled Playwright Chromium
