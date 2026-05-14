@@ -25,9 +25,10 @@ def _ensure_browser():
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
-        raise RuntimeError("Playwright not installed. Run: pip install playwright && python -m playwright install chromium")
+        raise RuntimeError("Playwright not installed. Run: pip install playwright")
     _PLAYWRIGHT = sync_playwright().start()
-    _BROWSER = _PLAYWRIGHT.chromium.launch(
+
+    launch_opts = dict(
         headless=False,
         args=[
             "--disable-blink-features=AutomationControlled",
@@ -36,12 +37,28 @@ def _ensure_browser():
             "--start-maximized",
         ],
     )
+
+    # Try system Chrome/Edge first (no separate download needed),
+    # then fall back to bundled Chromium (requires `playwright install chromium`)
+    for channel in ("chrome", "msedge", None):
+        try:
+            _BROWSER = _PLAYWRIGHT.chromium.launch(channel=channel, **launch_opts)
+            browser_name = channel or "chromium"
+            logger.info("Browser launched using system %s.", browser_name)
+            break
+        except Exception:
+            continue
+    else:
+        raise RuntimeError(
+            "No browser found. Install Chrome/Edge, or run: python -m playwright install chromium"
+        )
+
     _BROWSER_CONTEXT = _BROWSER.new_context(
         viewport={"width": 1280, "height": 720},
         no_viewport=True,
     )
     _PAGE = _BROWSER_CONTEXT.new_page()
-    logger.info("Browser launched.")
+    logger.info("Browser ready.")
 
 
 def _safe_page():
