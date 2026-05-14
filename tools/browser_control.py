@@ -38,19 +38,28 @@ def _ensure_browser():
         ],
     )
 
-    # Try system Chrome/Edge first (no separate download needed),
-    # then fall back to bundled Chromium (requires `playwright install chromium`)
-    for channel in ("chrome", "msedge", None):
+    # Try system browsers in order: Chrome, Edge, Brave, then bundled Chromium
+    browser_candidates = [
+        ("chrome", None),
+        ("msedge", None),
+        ("brave", r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe"),
+        ("brave", r"C:\Program Files (x86)\BraveSoftware\Brave-Browser\Application\brave.exe"),
+        (None, None),  # bundled Playwright Chromium
+    ]
+    for channel, exec_path in browser_candidates:
         try:
-            _BROWSER = _PLAYWRIGHT.chromium.launch(channel=channel, **launch_opts)
+            if exec_path:
+                _BROWSER = _PLAYWRIGHT.chromium.launch(executable_path=exec_path, **launch_opts)
+            else:
+                _BROWSER = _PLAYWRIGHT.chromium.launch(channel=channel, **launch_opts)
             browser_name = channel or "chromium"
-            logger.info("Browser launched using system %s.", browser_name)
+            logger.info("Browser launched using %s.", browser_name)
             break
         except Exception:
             continue
     else:
         raise RuntimeError(
-            "No browser found. Install Chrome/Edge, or run: python -m playwright install chromium"
+            "No browser found. Install Chrome, Edge, or Brave."
         )
 
     _BROWSER_CONTEXT = _BROWSER.new_context(
